@@ -43,7 +43,7 @@ Automatically detects, extends, dynamically trims, and alerts on unmitigated 3-c
 
 ## How to Install on TradingView
 
-1. Open either `bos-indicator.pine` or `unfilled-fvg.pine` in this repository and copy the full source code.
+1. Open either `2-Candle Alternating BOS.pine` or `Unfilled Fair Value Gaps (FVG).pine` in this repository and copy the full source code.
 2. Open **TradingView** and click the **Pine Editor** tab at the bottom of your chart.
 3. Clear any default template code, paste the script, and click **Save**.
 4. Click **Add to Chart** to apply the indicator.
