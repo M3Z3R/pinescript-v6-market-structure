@@ -1,0 +1,245 @@
+//@version=6
+indicator("Unfilled Fair Value Gaps (FVG) v6", shorttitle="Unfilled FVG v6", overlay=true, max_boxes_count=500, max_lines_count=500)
+
+// === INPUTS ===
+const string GRP_STYLE   = "Visuals & Styling"
+const string GRP_DETECT  = "Detection & Filtering"
+const string GRP_LIFECYC = "Mitigation & Lifecycle"
+
+const string MODE_STD    = "Threshold Fill"
+const string MODE_TRIM   = "Partial Trim (Wick)"
+
+// Visuals & Styling (placed first with compact inline rows)
+bool   showBullFVG      = input.bool(true, "Bullish FVGs", inline="bull", group=GRP_STYLE, tooltip="Toggle display, fill color, and border color for bullish Fair Value Gaps.")
+color  bullFillColor    = input.color(color.new(#00bfa5, 82), "Fill", inline="bull", group=GRP_STYLE)
+color  bullBorderColor  = input.color(color.new(#00bfa5, 40), "Border", inline="bull", group=GRP_STYLE)
+
+bool   showBearFVG      = input.bool(true, "Bearish FVGs", inline="bear", group=GRP_STYLE, tooltip="Toggle display, fill color, and border color for bearish Fair Value Gaps.")
+color  bearFillColor    = input.color(color.new(#ef5350, 82), "Fill", inline="bear", group=GRP_STYLE)
+color  bearBorderColor  = input.color(color.new(#ef5350, 40), "Border", inline="bear", group=GRP_STYLE)
+
+bool   showMidline      = input.bool(true, "50% Midline", inline="mid", group=GRP_STYLE, tooltip="Draws a dashed midpoint line at the 50% equilibrium level of each FVG.")
+color  bullMidColor     = input.color(color.new(#00bfa5, 50), "Bull", inline="mid", group=GRP_STYLE)
+color  bearMidColor     = input.color(color.new(#ef5350, 50), "Bear", inline="mid", group=GRP_STYLE)
+
+// Detection & Filtering
+float  minGapAtrMult    = input.float(0.2, "Min Gap Size (ATR Multiplier)", minval=0.0, step=0.05, group=GRP_DETECT, tooltip="Ignores FVGs smaller than this multiple of ta.atr(14).")
+bool   showLiveHTF      = input.bool(true, "Show Forming FVG (>1m Timeframes)", group=GRP_DETECT, tooltip="On timeframes above 1 minute, previews FVGs on the live candle before it closes (shown with a dotted border until confirmed).")
+
+// Mitigation & Lifecycle
+float  fillThresholdPct = input.float(20.0, "Fill Threshold (%)", minval=1.0, maxval=100.0, step=5.0, group=GRP_LIFECYC, tooltip="Marks the FVG as filled once price retraces at least this percentage into the gap (stays visible while price is inside it, then deletes once price leaves).")
+string mitigationMode   = input.string(MODE_STD, "Mitigation Mode", options=[MODE_STD, MODE_TRIM], group=GRP_LIFECYC, tooltip="Threshold Fill: box stays intact until price reaches the Fill Threshold.\nPartial Trim: shrinks the breached edge dynamically until the Fill Threshold is reached.")
+float  maxDistAtrMult   = input.float(15.0, "Max Distance from Price (ATR Mult)", minval=0.0, step=1.0, group=GRP_LIFECYC, tooltip="Removes active FVGs farther than this multiple of ta.atr(14) from current price so all timeframes stay proportional. Set to 0 to disable.")
+int    maxActiveFVGs    = input.int(20, "Max Active FVGs", minval=1, maxval=200, group=GRP_LIFECYC, tooltip="Maximum number of active unmitigated FVG boxes on chart. Oldest box is deleted when exceeded.")
+
+
+// === HELPER FUNCTIONS ===
+
+// Removes any active opposite-direction FVG whose price range overlaps a newly formed FVG.
+removeOppositeOverlaps(array<box> oppBoxes, array<line> oppLines, array<float> oppFills, array<bool> oppFilled, float newTop, float newBot) =>
+    if oppBoxes.size() > 0
+        for i = oppBoxes.size() - 1 to 0
+            box   b    = oppBoxes.get(i)
+            line  m    = oppLines.get(i)
+            float bTop = box.get_top(b)
+            float bBot = box.get_bottom(b)
+            if bBot < newTop and bTop > newBot
+                oppBoxes.remove(i)
+                oppLines.remove(i)
+                oppFills.remove(i)
+                oppFilled.remove(i)
+                if not na(m)
+                    line.delete(m)
+                box.delete(b)
+
+// Creates a new active FVG box, optional 50% midline, and precomputed fill threshold price.
+createFVG(array<box> boxes, array<line> lines, array<float> fillPrices, array<bool> filledFlags, float gapTop, float gapBot, float fillPct, bool isBullish, bool isForming, color fillCol, color borderCol, color midCol, bool drawMidline) =>
+    box b = box.new(
+      left         = bar_index - 2,
+      top          = gapTop,
+      right        = bar_index,
+      bottom       = gapBot,
+      border_color = borderCol,
+      border_width = 1,
+      border_style = isForming ? line.style_dotted : line.style_solid,
+      extend       = extend.right,
+      bgcolor      = fillCol
+      )
+    line m = na
+    if drawMidline
+        float midPrice = (gapTop + gapBot) * 0.5
+        m := line.new(
+          x1     = bar_index - 2,
+          y1     = midPrice,
+          x2     = bar_index,
+          y2     = midPrice,
+          color  = midCol,
+          style  = line.style_dashed,
+          width  = 1,
+          extend = extend.right
+          )
+    float gapHeight = gapTop - gapBot
+    float fillPrice = isBullish ? (gapTop - gapHeight * (fillPct / 100.0)) : (gapBot + gapHeight * (fillPct / 100.0))
+    boxes.push(b)
+    lines.push(m)
+    fillPrices.push(fillPrice)
+    filledFlags.push(false)
+
+// Updates all active boxes for a direction: prunes far-away gaps, detects entry, trims wicks,
+// keeps filled gaps visible while price is still inside them, and deletes them once price leaves.
+processMitigation(array<box> boxes, array<line> lines, array<float> fillPrices, array<bool> filledFlags, bool isBullish, string mode, float maxDist) =>
+    bool entered = false
+    if boxes.size() > 0
+        for i = boxes.size() - 1 to 0
+            box   b         = boxes.get(i)
+            line  m         = lines.get(i)
+            float fillPrice = fillPrices.get(i)
+            bool  wasFilled = filledFlags.get(i)
+            float bTop      = box.get_top(b)
+            float bBot      = box.get_bottom(b)
+
+            // Prune active FVGs that are proportionally too far from current price
+            float distToPrice = close > bTop ? (close - bTop) : (close < bBot ? (bBot - close) : 0.0)
+            if maxDist > 0.0 and distToPrice > maxDist
+                boxes.remove(i)
+                lines.remove(i)
+                fillPrices.remove(i)
+                filledFlags.remove(i)
+                if not na(m)
+                    line.delete(m)
+                box.delete(b)
+                continue
+
+            bool priceInGap = low <= bTop and high >= bBot
+
+            if wasFilled
+                // Previously filled FVG stays visible only while price is still inside it
+                if not priceInGap
+                    boxes.remove(i)
+                    lines.remove(i)
+                    fillPrices.remove(i)
+                    filledFlags.remove(i)
+                    if not na(m)
+                        line.delete(m)
+                    box.delete(b)
+            else
+                // Detect fresh price entry into the active gap zone
+                bool touched = isBullish ? (low <= bTop) : (high >= bBot)
+                if touched
+                    entered := true
+
+                // Mark as filled once price retraces at least Fill Threshold (%) into the gap
+                bool isFilled = isBullish ? (low <= fillPrice) : (high >= fillPrice)
+
+                if isFilled
+                    if priceInGap
+                        filledFlags.set(i, true)
+                    else
+                        boxes.remove(i)
+                        lines.remove(i)
+                        fillPrices.remove(i)
+                        filledFlags.remove(i)
+                        if not na(m)
+                            line.delete(m)
+                        box.delete(b)
+                else if mode == MODE_TRIM and touched
+                    // Dynamically shrink the breached edge and recenter the 50% equilibrium midline
+                    if isBullish and low < bTop
+                        box.set_top(b, low)
+                        if not na(m)
+                            float newMid = (low + bBot) * 0.5
+                            line.set_y1(m, newMid)
+                            line.set_y2(m, newMid)
+                    else if not isBullish and high > bBot
+                        box.set_bottom(b, high)
+                        if not na(m)
+                            float newMid = (bTop + high) * 0.5
+                            line.set_y1(m, newMid)
+                            line.set_y2(m, newMid)
+    entered
+
+// Enforces the maximum active FVG cap across both directions by safely deleting the oldest box first.
+enforceMaxCap(array<box> bullBoxes, array<line> bullLines, array<float> bullFills, array<bool> bullFilled, array<box> bearBoxes, array<line> bearLines, array<float> bearFills, array<bool> bearFilled, int maxCap) =>
+    while (bullBoxes.size() + bearBoxes.size()) > maxCap
+        bool dropBull = false
+        if bullBoxes.size() > 0 and bearBoxes.size() > 0
+            dropBull := box.get_left(bullBoxes.first()) <= box.get_left(bearBoxes.first())
+        else
+            dropBull := bullBoxes.size() > 0
+
+        if dropBull
+            box  oldBox  = bullBoxes.shift()
+            line oldLine = bullLines.shift()
+            bullFills.shift()
+            bullFilled.shift()
+            if not na(oldLine)
+                line.delete(oldLine)
+            box.delete(oldBox)
+        else
+            box  oldBox  = bearBoxes.shift()
+            line oldLine = bearLines.shift()
+            bearFills.shift()
+            bearFilled.shift()
+            if not na(oldLine)
+                line.delete(oldLine)
+            box.delete(oldBox)
+
+
+// === FVG DETECTION ===
+// Calculate ATR on every bar for consistent series state across all timeframes
+float atrVal     = ta.atr(14)
+float minGapSize = nz(atrVal) * minGapAtrMult
+float maxDist    = nz(atrVal) * maxDistAtrMult
+
+// Allow live unconfirmed preview on timeframes strictly above 1 minute (> 60s)
+bool isHigherTF = timeframe.in_seconds() > 60
+bool isForming  = showLiveHTF and isHigherTF and barstate.isrealtime and not barstate.isconfirmed
+bool canDetect  = barstate.isconfirmed or isForming
+
+// 3-candle Bullish FVG
+float bullGapTop = low
+float bullGapBot = high[2]
+bool  isBullFVG  = canDetect and bar_index >= 2 and bullGapTop > bullGapBot and close[1] > open[1] and (bullGapTop - bullGapBot) >= minGapSize
+
+// 3-candle Bearish FVG
+float bearGapTop = low[2]
+float bearGapBot = high
+bool  isBearFVG  = canDetect and bar_index >= 2 and bearGapBot < bearGapTop and close[1] < open[1] and (bearGapTop - bearGapBot) >= minGapSize
+
+
+// === MITIGATION & RENDERING ===
+var array<box>   bullBoxes  = array.new<box>()
+var array<line>  bullLines  = array.new<line>()
+var array<float> bullFills  = array.new<float>()
+var array<bool>  bullFilled = array.new<bool>()
+
+var array<box>   bearBoxes  = array.new<box>()
+var array<line>  bearLines  = array.new<line>()
+var array<float> bearFills  = array.new<float>()
+var array<bool>  bearFilled = array.new<bool>()
+
+// Step 1: Process existing active FVGs before adding new ones from the current bar
+bool priceEnteredBull = processMitigation(bullBoxes, bullLines, bullFills, bullFilled, true,  mitigationMode, maxDist)
+bool priceEnteredBear = processMitigation(bearBoxes, bearLines, bearFills, bearFilled, false, mitigationMode, maxDist)
+
+// Step 2: Remove any overlapping opposite FVG, then draw newly detected FVGs
+bool newBullFormed = isBullFVG and showBullFVG
+bool newBearFormed = isBearFVG and showBearFVG
+
+if newBullFormed
+    removeOppositeOverlaps(bearBoxes, bearLines, bearFills, bearFilled, bullGapTop, bullGapBot)
+    createFVG(bullBoxes, bullLines, bullFills, bullFilled, bullGapTop, bullGapBot, fillThresholdPct, true,  isForming, bullFillColor, bullBorderColor, bullMidColor, showMidline)
+
+if newBearFormed
+    removeOppositeOverlaps(bullBoxes, bullLines, bullFills, bullFilled, bearGapTop, bearGapBot)
+    createFVG(bearBoxes, bearLines, bearFills, bearFilled, bearGapTop, bearGapBot, fillThresholdPct, false, isForming, bearFillColor, bearBorderColor, bearMidColor, showMidline)
+
+// Step 3: Enforce maximum active box cap
+enforceMaxCap(bullBoxes, bullLines, bullFills, bullFilled, bearBoxes, bearLines, bearFills, bearFilled, maxActiveFVGs)
+
+
+// === ALERTS ===
+alertcondition(newBullFormed,    title="New Bullish FVG Formed",    message="New Bullish FVG formed on {{ticker}} ({{interval}})")
+alertcondition(newBearFormed,    title="New Bearish FVG Formed",    message="New Bearish FVG formed on {{ticker}} ({{interval}})")
+alertcondition(priceEnteredBull, title="Price Entered Bullish FVG", message="Price entered an active Bullish FVG on {{ticker}} ({{interval}})")
+alertcondition(priceEnteredBear, title="Price Entered Bearish FVG", message="Price entered an active Bearish FVG on {{ticker}} ({{interval}})")
