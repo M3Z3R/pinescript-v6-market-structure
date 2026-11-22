@@ -6,7 +6,7 @@ Clean, non-repainting **Pine Script v6** (`//@version=6`) indicators built for p
 
 ## Included Indicators
 
-### 1. 2-Candle Alternating Break of Structure (`bos-indicator.pine`)
+### 1. 2-Candle Alternating Break of Structure (`2-Candle Alternating BOS.pine`)
 Detects confirmed structural shifts using 2-candle swing formations with an alternating trend-state machine to prevent redundant back-to-back signals in the same direction.
 
 * **2-Candle Swing Detection:** Identifies swing highs (bullish candle followed by bearish candle) and swing lows (bearish candle followed by bullish candle).
@@ -20,7 +20,7 @@ Detects confirmed structural shifts using 2-candle swing formations with an alte
 
 ---
 
-### 2. Unfilled Fair Value Gaps (`unfilled-fvg.pine`)
+### 2. Unfilled Fair Value Gaps (`Unfilled Fair Value Gaps (FVG).pine`)
 Automatically detects, extends, dynamically trims, and alerts on unmitigated 3-candle Fair Value Gaps (evaluated strictly on confirmed bar closes for zero repainting).
 
 * **3-Candle FVG Detection & ATR Filter:** Identifies bullish (`low[0] > high[2]`) and bearish (`high[0] < low[2]`) imbalances, filtering out noise via an ATR-based minimum gap multiplier (`ta.atr(14)`).
