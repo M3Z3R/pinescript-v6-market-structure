@@ -28,6 +28,8 @@ The **2-Candle Alternating Break of Structure** indicator tracks micro-structura
 3. Clear the default text, paste the code, and click **Save**.
 4. Click **Add to Chart**.
 
+## Visual
+https://github.com/user-attachments/assets/5bc74ad5-d75c-4cca-aa29-c196940d2e06
 ---
 
 ### Need Custom Pine Script Development?
