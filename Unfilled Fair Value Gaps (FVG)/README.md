@@ -37,6 +37,9 @@ A clean, light, and reliable TradingView indicator written in **Pine Script v6**
 3. Paste the code into the editor, click **Save**, and name your script.
 4. Click **Add to Chart**.
 
+## Visual
+https://github.com/user-attachments/assets/d373d5d0-ee35-4de1-a473-976ed6870f80
+
 ---
 
 ## Custom Indicator Development
